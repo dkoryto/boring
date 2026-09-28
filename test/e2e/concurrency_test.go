@@ -67,7 +67,14 @@ func listStatus(t *testing.T, env []string) string {
 // Clients that lose the race legitimately find the tunnel no longer
 // running, either when listing running tunnels or when sending the close
 // command, and exit with an error. That is expected here.
-var notRunning = []string{"No running tunnels match", "tunnel not running"}
+// Messages of clients that lost the race, depending on how far the winner
+// got: the tunnel is gone from the list, gone from the daemon, or already
+// shut down but not yet removed.
+var notRunning = []string{
+	"No running tunnels match",
+	"tunnel not running",
+	"trying to close a closed tunnel",
+}
 
 func TestCloseConcurrent(t *testing.T) {
 	env, cancel, err := makeDefaultEnvWithDaemon(t)
