@@ -137,6 +137,8 @@ func daemonWithCancel(env []string) (context.CancelFunc, error) {
 	for {
 		select {
 		case <-timeout:
+			// Don't leave the process behind when giving up on it
+			cancel()
 			return nil, fmt.Errorf("daemon not responsive after timeout")
 		case <-wait.C:
 			if conn, err := net.Dial("unix", sock); err == nil {
