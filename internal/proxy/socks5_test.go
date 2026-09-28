@@ -14,6 +14,7 @@ import (
 	"os"
 	"strings"
 	"testing"
+	"time"
 
 	xproxy "golang.org/x/net/proxy"
 )
@@ -37,17 +38,19 @@ func backendServer(listener net.Listener) {
 	listener.Close()
 }
 
+// udpEchoServer echoes datagrams until conn is closed. It keeps answering
+// so that a client can retry when a datagram gets lost.
 func udpEchoServer(conn net.PacketConn) {
 	var buf [1024]byte
-	n, addr, err := conn.ReadFrom(buf[:])
-	if err != nil {
-		panic(err)
+	for {
+		n, addr, err := conn.ReadFrom(buf[:])
+		if err != nil {
+			return
+		}
+		if _, err := conn.WriteTo(buf[:n], addr); err != nil {
+			return
+		}
 	}
-	_, err = conn.WriteTo(buf[:n], addr)
-	if err != nil {
-		panic(err)
-	}
-	conn.Close()
 }
 
 func TestMain(m *testing.M) {
@@ -211,6 +214,45 @@ func newUdpAssociateConn(t *testing.T, port int) (socks5Conn net.Conn, socks5UDP
 	return conn, udpProxySocksAddr
 }
 
+// UDP may drop datagrams, so the request is resent when no answer
+// arrives in time. Late answers to an earlier request come from another
+// echo server and are skipped.
+func sendUDPAndWaitResponse(t *testing.T, socks5UDPConn net.Conn, addr socksAddr, body []byte) []byte {
+	t.Helper()
+	udpPayload, err := (&udpRequest{addr: addr}).marshal()
+	if err != nil {
+		t.Fatal(err)
+	}
+	udpPayload = append(udpPayload, body...)
+	buf := make([]byte, 1024)
+	for attempt := 0; attempt < 10; attempt++ {
+		if _, err := socks5UDPConn.Write(udpPayload); err != nil {
+			t.Fatal(err)
+		}
+		if err := socks5UDPConn.SetReadDeadline(time.Now().Add(time.Second)); err != nil {
+			t.Fatal(err)
+		}
+		for {
+			n, err := socks5UDPConn.Read(buf)
+			if errors.Is(err, os.ErrDeadlineExceeded) {
+				break
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			hdr, responseBody, err := parseUDPRequest(buf[:n])
+			if err != nil {
+				t.Fatal(err)
+			}
+			if hdr.addr.port == addr.port {
+				return responseBody
+			}
+		}
+	}
+	t.Fatalf("no response from %s", addr.hostPort())
+	return nil
+}
+
 func TestUDP(t *testing.T) {
 	// backend UDP server which we'll use SOCKS5 to connect to
 	newUDPEchoServer := func() net.PacketConn {
@@ -245,28 +287,6 @@ func TestUDP(t *testing.T) {
 	conn, udpProxySocksAddr := newUdpAssociateConn(t, socks5Port)
 	defer conn.Close()
 
-	sendUDPAndWaitResponse := func(socks5UDPConn net.Conn, addr socksAddr, body []byte) (responseBody []byte) {
-		udpPayload, err := (&udpRequest{addr: addr}).marshal()
-		if err != nil {
-			t.Fatal(err)
-		}
-		udpPayload = append(udpPayload, body...)
-		_, err = socks5UDPConn.Write(udpPayload)
-		if err != nil {
-			t.Fatal(err)
-		}
-		buf := make([]byte, 1024)
-		n, err := socks5UDPConn.Read(buf)
-		if err != nil {
-			t.Fatal(err)
-		}
-		_, responseBody, err = parseUDPRequest(buf[:n])
-		if err != nil {
-			t.Fatal(err)
-		}
-		return responseBody
-	}
-
 	udpProxyAddr, err := net.ResolveUDPAddr("udp", udpProxySocksAddr.hostPort())
 	if err != nil {
 		t.Fatal(err)
@@ -281,7 +301,7 @@ func TestUDP(t *testing.T) {
 		port := echoServerListener[i].LocalAddr().(*net.UDPAddr).Port
 		addr := socksAddr{addrType: ipv4, addr: "127.0.0.1", port: uint16(port)}
 		requestBody := []byte(fmt.Sprintf("Test %d", i))
-		responseBody := sendUDPAndWaitResponse(socks5UDPConn, addr, requestBody)
+		responseBody := sendUDPAndWaitResponse(t, socks5UDPConn, addr, requestBody)
 		if !bytes.Equal(requestBody, responseBody) {
 			t.Fatalf("got: %q want: %q", responseBody, requestBody)
 		}
