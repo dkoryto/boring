@@ -48,6 +48,9 @@ type daemon struct {
 
 	// TODO: write proper concurrent map structure for this
 	tunnels map[string]*tunnel.Tunnel
+	// opening holds the tunnels whose Open is in progress. The channel is
+	// closed once it finishes, successful or not.
+	opening map[string]chan struct{}
 	mutex   sync.RWMutex
 
 	once sync.Once
@@ -56,8 +59,13 @@ type daemon struct {
 
 func newDaemon(parent context.Context, ln net.Listener) (*daemon, context.CancelFunc) {
 	ctx, cancel := context.WithCancel(parent)
-	tunnels := make(map[string]*tunnel.Tunnel)
-	d := &daemon{ctx: ctx, cancel: cancel, ln: ln, tunnels: tunnels}
+	d := &daemon{
+		ctx:     ctx,
+		cancel:  cancel,
+		ln:      ln,
+		tunnels: make(map[string]*tunnel.Tunnel),
+		opening: make(map[string]chan struct{}),
+	}
 
 	go func() {
 		// Parent-driven shutdown
@@ -157,33 +165,70 @@ func (d *daemon) openTunnel(conn net.Conn, desc *tunnel.Desc) {
 	var err error
 	defer func() { respond(conn, err, nil) }()
 
-	d.mutex.RLock()
-	_, exists := d.tunnels[desc.Name]
-	d.mutex.RUnlock()
-	if exists {
-		err = AlreadyRunning
+	if err = d.reserve(desc.Name); err != nil {
 		log.Errorf("%v: could not open: %v", desc.Name, err)
 		return
 	}
 
 	t := tunnel.FromDesc(desc)
-	if err = t.Open(); err != nil {
+	err = t.Open()
+
+	d.mutex.Lock()
+	close(d.opening[desc.Name])
+	delete(d.opening, desc.Name)
+	if err == nil {
+		d.tunnels[t.Name] = t
+	}
+	d.mutex.Unlock()
+
+	if err != nil {
 		log.Errorf("%v: could not open: %v", t.Name, err)
 		return
 	}
 
-	d.mutex.Lock()
-	d.tunnels[t.Name] = t
-	d.mutex.Unlock()
-
 	// Register closing logic
 	go func() {
 		<-t.Closed
-		d.mutex.Lock()
-		delete(d.tunnels, t.Name)
-		d.mutex.Unlock()
+		d.removeTunnel(t)
 		log.Infof("Closed tunnel %s", t.Name)
 	}()
+}
+
+// reserve marks the tunnel name as being opened. If another client is
+// opening the same tunnel, it waits for that attempt to finish first: if it
+// succeeded the tunnel is already running, otherwise this client tries
+// again itself.
+func (d *daemon) reserve(name string) error {
+	for {
+		d.mutex.Lock()
+		if _, ok := d.tunnels[name]; ok {
+			d.mutex.Unlock()
+			return AlreadyRunning
+		}
+		wait, ok := d.opening[name]
+		if !ok {
+			d.opening[name] = make(chan struct{})
+			d.mutex.Unlock()
+			return nil
+		}
+		d.mutex.Unlock()
+
+		select {
+		case <-wait:
+		case <-d.ctx.Done():
+			return d.ctx.Err()
+		}
+	}
+}
+
+// removeTunnel forgets about t, unless its name has meanwhile been taken
+// by a tunnel that was opened after it.
+func (d *daemon) removeTunnel(t *tunnel.Tunnel) {
+	d.mutex.Lock()
+	defer d.mutex.Unlock()
+	if d.tunnels[t.Name] == t {
+		delete(d.tunnels, t.Name)
+	}
 }
 
 func (d *daemon) closeTunnel(conn net.Conn, q *tunnel.Desc) {
@@ -204,13 +249,16 @@ func (d *daemon) closeTunnel(conn net.Conn, q *tunnel.Desc) {
 		return
 	}
 	<-t.Closed
+	// Also remove it here, so it is gone by the time the client gets the
+	// response, rather than whenever the closing goroutine gets to it.
+	d.removeTunnel(t)
 }
 
 func (d *daemon) listTunnels(conn net.Conn) {
 	d.mutex.RLock()
 	ts := make(map[string]tunnel.Desc, len(d.tunnels))
 	for n, t := range d.tunnels {
-		ts[n] = *t.Desc
+		ts[n] = t.Snapshot()
 	}
 	d.mutex.RUnlock()
 	respond(conn, nil, ts)
