@@ -932,8 +932,8 @@ func TestTunnelKeepAlive(t *testing.T) {
 	// keep-alive should be sent within a second for this tunnel
 	time.Sleep(1100 * time.Millisecond)
 
-	if server.keepAlives != 1 {
-		t.Fatalf("expected 1 keep-alive, got %d", server.keepAlives)
+	if n := server.getKeepAlives(); n != 1 {
+		t.Fatalf("expected 1 keep-alive, got %d", n)
 	}
 }
 
