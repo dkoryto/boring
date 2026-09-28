@@ -605,3 +605,52 @@ func TestMakeSignersImplicitCertificate(t *testing.T) {
 		t.Fatal("first signer should be the certificate")
 	}
 }
+
+// A certificate held by the agent must be recognized as such, even though
+// the agent client hands out its keys as *agent.Key. With IdentitiesOnly it
+// has to be kept when the configured identity is its underlying key.
+func TestMakeSignersAgentCertificate(t *testing.T) {
+	priv, s := genKey(t)
+	c := signCert(t, s.PublicKey())
+	useAgentKeys(t, agent.AddedKey{PrivateKey: priv, Certificate: c})
+
+	pubPath := writeFile(t, "id.pub", ssh.MarshalAuthorizedKey(s.PublicKey()))
+	sc := &SSHConfig{Alias: "h", IdentityFiles: []string{pubPath}, IdentitiesOnly: true}
+	sigs, err := sc.makeSigners()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(sigs) != 1 {
+		t.Fatalf("got %d signers, want 1", len(sigs))
+	}
+	if string(sigs[0].PublicKey().Marshal()) != string(c.Marshal()) {
+		t.Fatal("signer is not the agent's certificate")
+	}
+
+	// A certificate for a key that isn't configured is dropped
+	_, other := genKey(t)
+	sc.IdentityFiles = []string{writeFile(t, "other.pub", ssh.MarshalAuthorizedKey(other.PublicKey()))}
+	if sigs, err = sc.makeSigners(); err == nil && len(sigs) != 0 {
+		t.Fatalf("got %d signers, want none", len(sigs))
+	}
+}
+
+func TestAsCert(t *testing.T) {
+	_, s := genKey(t)
+	c := signCert(t, s.PublicKey())
+
+	if got, ok := asCert(c); !ok || string(got.Marshal()) != string(c.Marshal()) {
+		t.Error("certificate not recognized")
+	}
+	// What the agent client returns for a certificate identity
+	wrapped := &agent.Key{Format: c.Type(), Blob: c.Marshal()}
+	if got, ok := asCert(wrapped); !ok || string(got.Marshal()) != string(c.Marshal()) {
+		t.Error("certificate from agent not recognized")
+	}
+	if _, ok := asCert(s.PublicKey()); ok {
+		t.Error("plain key taken for a certificate")
+	}
+	if _, ok := asCert(dummyKey{}); ok {
+		t.Error("unparsable key taken for a certificate")
+	}
+}
