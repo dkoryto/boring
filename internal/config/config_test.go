@@ -2,6 +2,7 @@ package config
 
 import (
 	"path/filepath"
+	"runtime"
 	"testing"
 )
 
@@ -11,6 +12,23 @@ func TestLoadMissingFile(t *testing.T) {
 	Path = filepath.Join(t.TempDir(), "missing.toml")
 	if _, err := Load(); err == nil {
 		t.Error("expected error for missing config file")
+	}
+}
+
+func TestGetConfigHome(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		if got := getConfigHome(); got != "~" {
+			t.Errorf("getConfigHome() = %q, want %q", got, "~")
+		}
+		return
+	}
+	t.Setenv("XDG_CONFIG_HOME", "/xdg")
+	if got, want := getConfigHome(), filepath.Join("/xdg", "boring"); got != want {
+		t.Errorf("getConfigHome() = %q, want %q", got, want)
+	}
+	t.Setenv("XDG_CONFIG_HOME", "")
+	if got, want := getConfigHome(), filepath.Join("~/.config", "boring"); got != want {
+		t.Errorf("getConfigHome() = %q, want %q", got, want)
 	}
 }
 
