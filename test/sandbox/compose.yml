@@ -1,0 +1,11 @@
+# Two sshd containers for trying boring by hand:
+#   bastion - reachable from the host on localhost:2222
+#   target  - only reachable through bastion (ProxyJump)
+# Both run busybox httpd on 127.0.0.1:8080 inside the container.
+services:
+  bastion:
+    build: .
+    ports:
+      - "127.0.0.1:2222:22"
+  target:
+    build: .
